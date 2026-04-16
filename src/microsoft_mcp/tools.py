@@ -426,7 +426,7 @@ def move_email(
     """Move email to another folder"""
     folder_path = FOLDERS.get(destination_folder.casefold(), destination_folder)
 
-    folders = graph.request("GET", "/me/mailFolders", account_id)
+    folders = graph.request("GET", "/me/mailFolders?$top=100&$expand=childFolders", account_id)
     folder_id = None
 
     if not folders:
@@ -434,10 +434,25 @@ def move_email(
     if "value" not in folders:
         raise ValueError(f"Unexpected folder response structure: {folders}")
 
+    # Support "Parent/Child" folder paths (e.g., "Clients/Canopy Wealth")
+    path_parts = folder_path.split("/")
+
     for folder in folders["value"]:
-        if folder["displayName"].lower() == folder_path.lower():
-            folder_id = folder["id"]
-            break
+        if len(path_parts) == 1:
+            # Simple folder name match at top level
+            if folder["displayName"].lower() == path_parts[0].lower():
+                folder_id = folder["id"]
+                break
+        elif len(path_parts) == 2:
+            # Parent/Child match
+            if folder["displayName"].lower() == path_parts[0].lower():
+                child_folders = folder.get("childFolders", [])
+                for child in child_folders:
+                    if child["displayName"].lower() == path_parts[1].lower():
+                        folder_id = child["id"]
+                        break
+                if folder_id:
+                    break
 
     if not folder_id:
         raise ValueError(f"Folder '{destination_folder}' not found")
@@ -524,8 +539,16 @@ def create_event(
     body: str | None = None,
     attendees: str | list[str] | None = None,
     timezone: str = "UTC",
+    recurrence: dict[str, Any] | None = None,
+    reminder_minutes_before_start: int | None = None,
 ) -> dict[str, Any]:
-    """Create a calendar event"""
+    """Create a calendar event.
+
+    recurrence: optional Graph API recurrence object with 'pattern' and 'range'.
+    Example weekly: {"pattern": {"type": "weekly", "interval": 1,
+    "daysOfWeek": ["wednesday"]}, "range": {"type": "noEnd",
+    "startDate": "2026-04-22"}}
+    """
     event = {
         "subject": subject,
         "start": {"dateTime": start, "timeZone": timezone},
@@ -543,6 +566,12 @@ def create_event(
         event["attendees"] = [
             {"emailAddress": {"address": a}, "type": "required"} for a in attendees_list
         ]
+
+    if recurrence:
+        event["recurrence"] = recurrence
+
+    if reminder_minutes_before_start is not None:
+        event["reminderMinutesBeforeStart"] = reminder_minutes_before_start
 
     result = graph.request("POST", "/me/events", account_id, json=event)
     if not result:
@@ -572,7 +601,21 @@ def update_event(
     if "location" in updates:
         formatted_updates["location"] = {"displayName": updates["location"]}
     if "body" in updates:
-        formatted_updates["body"] = {"contentType": "Text", "content": updates["body"]}
+        body_val = updates["body"]
+        if isinstance(body_val, dict):
+            formatted_updates["body"] = body_val
+        else:
+            formatted_updates["body"] = {"contentType": "Text", "content": body_val}
+    if "recurrence" in updates:
+        formatted_updates["recurrence"] = updates["recurrence"]
+    if "isReminderOn" in updates:
+        formatted_updates["isReminderOn"] = updates["isReminderOn"]
+    if "reminderMinutesBeforeStart" in updates:
+        formatted_updates["reminderMinutesBeforeStart"] = updates["reminderMinutesBeforeStart"]
+    if "showAs" in updates:
+        formatted_updates["showAs"] = updates["showAs"]
+    if "categories" in updates:
+        formatted_updates["categories"] = updates["categories"]
 
     result = graph.request(
         "PATCH", f"/me/events/{event_id}", account_id, json=formatted_updates
